@@ -1,0 +1,693 @@
+/* ###################################################################
+**     Filename    : main.c
+**     Project     : FRDMK64F-TCP-Port
+**     Processor   : MK64FN1M0VLL12
+**     Version     : Driver 01.01
+**     Compiler    : GNU C Compiler
+**     Date/Time   : 2015-10-18, 16:12, # CodeGen: 0
+**     Abstract    :
+**         Main module.
+**         This module contains user's application code.
+**     Settings    :
+**     Contents    :
+**         No public methods
+**
+** ###################################################################*/
+/*!
+** @file main.c
+** @version 01.01
+** @brief`
+**         Main module.
+**         This module contains user's application code.
+*/         
+/*!
+**  @addtogroup main_module main module documentation
+**  @{
+*/         
+/* MODULE main */
+
+
+/* Including needed modules to compile this module/procedure */
+#include "Cpu.h"
+#include "Events.h"
+#include "rtos_main_task.h"
+#include "clockMan1.h"
+#include "pin_init.h"
+#include "osa1.h"
+#include "free_rtos.h"
+#include "MainTask.h"
+#include "eNet1.h"
+
+#include "UTIL1.h"
+#include "KSDK1.h"
+#include "CS1.h"
+#if CPU_INIT_CONFIG
+  	  #include "Init_Config.h"
+#endif
+/* User includes (#include below this line is not maintained by Processor Expert) */
+#define DHCP_TIMEOUT  10
+
+#include <string.h>
+#include <stdio.h>
+
+#include "NetworkInterface.h"
+#include "NetworkBufferManagement.h"
+#include "FreeRTOS_Sockets.h"
+#include "FreeRTOS_IP.h"
+#include "FreeRTOS_UDP_IP.h"
+#include "FreeRTOS_ARP.h"
+
+#include "lwip/udp.h"
+#include "lwip/def.h"
+#include "lwip/memp.h"
+#include "lwip/inet_chksum.h"
+#include "lwip/ip_addr.h"
+#include "lwip/netif.h"
+#include "lwip/icmp.h"
+#include "lwip/stats.h"
+#include "lwip/snmp.h"
+#include "arch/perf.h"
+#include "lwip/dhcp.h"
+
+
+#include "lwip/api.h"
+#include "lwip/tcpip.h"
+#include "lwip/udp.h"
+#include "lwip/dhcp.h"
+#include "netif/etharp.h"
+#include "ethernetif.h"
+
+
+
+#define ipconfigENABLE_BACKWARD_COMPATIBILITY 1
+
+
+
+void vSoftwareInterruptHandler( void );
+
+
+static void LwipInitTask(void* pvArguments)
+{
+	err_t err;
+	struct netif fsl_netif0;
+	ip_addr_t fsl_netif0_ipaddr, fsl_netif0_netmask, fsl_netif0_gw;
+	char msg[] = "This is my message";
+
+	(void)	pvArguments;
+	// Init lwip stack
+	tcpip_init(NULL,NULL);
+	printf("%s: lwip init called ..\n", __FUNCTION__);
+
+	// Setup IP Config for DHCP ...
+	IP4_ADDR(&fsl_netif0_ipaddr, 0,0,0,0);
+	IP4_ADDR(&fsl_netif0_netmask, 0,0,0,0);
+	IP4_ADDR(&fsl_netif0_gw, 0,0,0,0);
+
+	// Add a network interface to the list of lwIP netifs.
+	netif_add(
+		  &fsl_netif0,
+		  &fsl_netif0_ipaddr,
+		  &fsl_netif0_netmask,
+		  &fsl_netif0_gw, NULL,
+		  ethernetif_init,
+		  ethernet_input);
+
+	// Set the network interface as the default network interface.
+	netif_set_default(&fsl_netif0);
+
+	for(;;)
+	{
+		/* obtain the IP address, default gateway and subnet mask by using DHCP*/
+		err = dhcp_start(&fsl_netif0);
+
+		printf("%s : Started DCHP request (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+		for(int i=0; i < DHCP_TIMEOUT && fsl_netif0.dhcp->state != DHCP_BOUND; i++)
+		{
+			printf("%s : Current DHCP State : %d\n", __FUNCTION__, fsl_netif0.dhcp->state);
+			// Wait a second
+			vTaskDelay(1000/portTICK_PERIOD_MS);
+		}
+
+		// Make it active ...
+		netif_set_up(&fsl_netif0);
+
+		printf("%s : Interface is up : %d\n", __FUNCTION__, fsl_netif0.dhcp->state);
+		printf("%s : IP %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.ip_addr));
+		printf("%s : NM %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.netmask));
+		printf("%s : GW %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.gw));
+
+		if (fsl_netif0.dhcp->state == DHCP_BOUND) {
+			// Send out some UDP data
+			struct netconn* pConnection;
+
+			// Create UDP connection
+			pConnection = netconn_new(NETCONN_UDP);
+
+			// Connect to local port
+			err = netconn_bind(pConnection, IP_ADDR_ANY, 12345);
+			printf("%s : Bound to IP_ADDR_ANY port 12345 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			err = netconn_connect(pConnection, IP_ADDR_BROADCAST, 12346 );
+			printf("%s : Connected to IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			for(int i = 0; i < 10; i++ )
+			{
+				struct netbuf* buf = netbuf_new();
+				void* data = netbuf_alloc(buf, sizeof(msg));
+
+				memcpy (data, msg, sizeof (msg));
+				err = netconn_send(pConnection, buf);
+				printf("%s : Sending to IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+				netbuf_delete(buf); // De-allocate packet buffer
+
+				// Wait a second
+				vTaskDelay(1000/portTICK_PERIOD_MS);
+			}
+
+			err = netconn_disconnect(pConnection);
+			printf("%s : Disconnected from IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			err = netconn_delete(pConnection);
+			printf("%s : Deleted connection (%s)\n", __FUNCTION__, lwip_strerr(err));
+		}
+
+		// Wait a second
+		vTaskDelay(1000/portTICK_PERIOD_MS);
+
+		// finish the lease of the IP address
+		err = dhcp_release(&fsl_netif0);
+		printf("%s : DHCP Release (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+		vTaskDelay(1000/portTICK_PERIOD_MS);
+	}
+}
+
+void LwipInitAskDHCPForIP()
+{
+	err_t err;
+	struct netif fsl_netif0;
+	ip_addr_t 			  fsl_netif0_ipaddr,
+  	  	  	  	  	  	  fsl_netif0_netmask,
+					  	  fsl_netif0_gw;
+
+	char msg[] = "This is my message";
+	tcpip_init(NULL,NULL);
+
+	printf("%s: lwip init called ..\n", __FUNCTION__);
+
+	// Setup IP Config for DHCP ...
+	IP4_ADDR(&fsl_netif0_ipaddr, 	0,0,0,0);
+	IP4_ADDR(&fsl_netif0_netmask, 0,0,0,0);
+	IP4_ADDR(&fsl_netif0_gw, 		0,0,0,0);
+
+	/* Add a network interface to the list of lwIP netifs. */
+	netif_add(
+		  &fsl_netif0,
+		  &fsl_netif0_ipaddr,
+		  &fsl_netif0_netmask,
+		  &fsl_netif0_gw,
+		  NULL,
+		  ethernetif_init,
+		  ethernet_input);
+
+	/* Set the network interface as the default network interface. */
+	netif_set_default(&fsl_netif0);
+
+	for(;;) {
+		/* obtain the IP address, default gateway and subnet mask by using DHCP*/
+		err = dhcp_start(&fsl_netif0);
+
+		printf("%s : Started DCHP request (%s)\n", __FUNCTION__, lwip_strerr(err));
+		for(int i=0; i < DHCP_TIMEOUT && fsl_netif0.dhcp->state != DHCP_BOUND; i++) {
+			printf("%s : Current DHCP State : %d\n", __FUNCTION__, fsl_netif0.dhcp->state);
+			// Wait a second
+			//vTaskDelay(1000/portTICK_PERIOD_MS);
+		}
+
+		// Make it active ...
+		netif_set_up(&fsl_netif0);
+
+		printf("%s : Interface is up : %d\n", __FUNCTION__, fsl_netif0.dhcp->state);
+		printf("%s : IP %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.ip_addr));
+		printf("%s : NM %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.netmask));
+		printf("%s : GW %s\n", __FUNCTION__, ipaddr_ntoa(&fsl_netif0.gw));
+
+		if (fsl_netif0.dhcp->state == DHCP_BOUND) {
+			// Send out some UDP data
+			struct netconn* pConnection;
+
+			// Create UDP connection
+			pConnection = netconn_new(NETCONN_UDP);
+
+			// Connect to local port
+			err = netconn_bind(pConnection, IP_ADDR_ANY, 12345);
+			printf("%s : Bound to IP_ADDR_ANY port 12345 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			err = netconn_connect(pConnection, IP_ADDR_BROADCAST, 12346 );
+			printf("%s : Connected to IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			for(int i = 0; i < 10; i++ )
+			{
+				struct netbuf* buf = netbuf_new();
+				void* data = netbuf_alloc(buf, sizeof(msg));
+
+				memcpy (data, msg, sizeof (msg));
+				err = netconn_send(pConnection, buf);
+				printf("%s : Sending to IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+				netbuf_delete(buf); // De-allocate packet buffer
+				// Wait a second
+				// vTaskDelay(1000/portTICK_PERIOD_MS);
+			}
+
+			err = netconn_disconnect(pConnection);
+			printf("%s : Disconnected from IP_ADDR_BROADCAST port 12346 (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+			err = netconn_delete(pConnection);
+			printf("%s : Deleted connection (%s)\n", __FUNCTION__, lwip_strerr(err));
+		}
+		// Wait a second
+		//  vTaskDelay(1000/portTICK_PERIOD_MS);
+
+		/* finish the lease of the IP address */
+		err = dhcp_release(&fsl_netif0);
+		printf("%s : DHCP Release (%s)\n", __FUNCTION__, lwip_strerr(err));
+
+		//  vTaskDelay(1000/portTICK_PERIOD_MS);
+	}
+}
+
+
+
+void SWI_IRQHandler(void)
+{
+	vSoftwareInterruptHandler();
+	printf("inside interrupt handler!\r\n");
+}
+
+static void prvSetupSoftwareInterrupt()
+{
+	// SVCall_IRQn
+	NVIC_SetPriority( SWI_IRQn, 4u );
+	NVIC_EnableIRQ( SWI_IRQn );
+	OSA_InstallIntHandler(SWI_IRQn, SWI_IRQHandler);
+	// SVC_Handler
+	// SVCall_IRQn
+}
+
+//void __svc(SVC_00) svc_zero(const char *string);
+//void SVC_Handler(unsigned int * svc_args) {
+void vSoftwareInterruptHandler( void )
+{
+	portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+	printf("inside interrupt!\r\n");
+	xSendEventStructToIPTask((void *) 0, (void *) 0);
+    NVIC_ClearPendingIRQ( SWI_IRQn );
+    portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+}
+
+
+
+
+/*
+int got_udp = 0;
+int sent_udp = 0;
+int send_test = 0; //toggled by button
+struct udp_pcb *pcb;
+
+void sendBroadcast() {
+	//broadcast something
+	struct pbuf *p;
+	char msg[] = "This is a test message";
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	err_t res = udp_sendto(pcb, p, IP_ADDR_BROADCAST, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message to port 1234, result is %d Waiting...\r\n", res);
+}
+
+static void udp_send_something(
+		char msg[],
+		struct udp_pcb *upcb,
+		struct ip_addr *addr,
+		u16_t port) {
+
+	printf("Sending message to port %d: %s\r\n", port, msg);
+	sent_udp = 1;
+	int psize = 40; //pick a size for now...
+	struct pbuf *q;
+	q = pbuf_alloc(PBUF_TRANSPORT, psize, PBUF_RAM);
+	printf("Making packet with size %d\r\n", psize);
+	if (q != NULL) {
+		sent_udp = 1;
+		q->payload = msg; //Assign the string pointer
+
+		err_t code;
+
+		code = udp_sendto(upcb, q, IP_ADDR_BROADCAST, port);
+		printf("Sent, result code is %d\r\n", code);
+
+		pbuf_free(q);
+	} else {
+		printf("Could not allocate packet buffer!\r\n");
+	}
+	sent_udp = 0;
+}
+
+static void udp_test_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, struct ip_addr *addr, u16_t port)
+{
+   printf("Received UDP Packet on port %d\r\n",port);
+  // printf("Received UDP Packet from ip_addr %s\r\n",  inet_ntoa(*(struct in_addr*)&(ip_addr)));
+  LWIP_UNUSED_ARG(arg);
+   got_udp = 1;
+
+  if (p != NULL) {
+    //Try to print out what we received
+    printf("UDP Packet Received! Payload:\r\n");
+    printf("-- %s --\r\n", (char *) (p->payload));
+   err_t code = udp_sendto(upcb, p, IP_ADDR_BROADCAST, 5555); //send it back to port 5555
+     printf("Echo'd packet, result code is %d\r\n",code);
+
+    pbuf_free(p);
+    got_udp=0;
+    sent_udp=0;
+  }
+}*/
+
+/*
+sudo ifconfig eth0 192.168.1.222 netmask 255.255.255.0
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -A FORWARD --in-interface eth0 -j ACCEPT
+sudo iptables --table nat -A POSTROUTING --out-interface wlan0 -j MASQUERADE
+ */
+
+/*
+void LwipInitSendUDP()
+{
+	struct pbuf *p;
+	char msg[] = "This is a test message";
+	err_t res;
+	struct netif netif;
+	ip_addr_t ipaddr, netmask, gw, out;
+
+	tcpip_init(NULL, NULL);
+
+	IP4_ADDR(&ipaddr, 192, 168, 1, 222);
+	IP4_ADDR(&netmask, 255, 255, 255, 0);
+	IP4_ADDR(&gw, 192, 168, 1, 255);
+	IP4_ADDR(&out, 192,168,1,116);
+
+	netif_add(&netif, &ipaddr, &netmask, &gw, NULL, ethernetif_init, ethernet_input);
+
+	netif_set_default(&netif);
+	netif_set_ipaddr(&netif, &ipaddr);
+	netif_set_netmask(&netif, &netmask);
+	netif_set_gw(&netif, &gw);
+	netif_set_up(&netif);
+
+	pcb = udp_new();
+	if (pcb != NULL) {
+		pcb->so_options |= SOF_BROADCAST;
+		udp_bind(pcb, IP_ADDR_ANY, 4444);
+		udp_recv(pcb, udp_test_recv, NULL);
+	} else {
+		printf("Could not make UDP pcb\r\n");
+	}
+
+
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	res = udp_sendto(pcb, p, &out, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message, result is %d Waiting...\r\n", res);
+
+/*
+sudo ifconfig eth0 192.168.1.222 netmask 255.255.255.0
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -A FORWARD --in-interface eth0 -j ACCEPT
+sudo iptables --table nat -A POSTROUTING --out-interface wlan0 -j MASQUERADE
+ */
+
+
+/*
+void sendBroadcast() {
+	//broadcast something
+	struct pbuf *p;
+	char msg[] = "This is a test message";
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	err_t res = udp_sendto(pcb, p, IP_ADDR_BROADCAST, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message to port 1234, result is %d Waiting...\r\n", res);
+}
+*/
+
+/*
+inet addr:10.20.9.65  Bcast:10.20.15.255  Mask:255.255.248.0
+ */
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	res = udp_sendto(pcb, p, &out, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message, result is %d Waiting...\r\n", res);
+
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	res = udp_sendto(pcb, p, &out, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message, result is %d Waiting...\r\n", res);
+
+
+	//sendBroadcast();
+
+}*/
+
+static const uint8_t ucIPAddress[4] = { 192, 168, 1, 200 };
+static const uint8_t ucNetMask[4] = { 255, 255, 255, 255 };
+static const uint8_t ucGatewayAddress[4] = { 192, 168, 1, 1 };
+static const uint8_t ucDNSServerAddress[4] = { 208, 67, 222, 222 };
+static uint8_t ucMACAddress[6] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+
+
+static void vUDPSendUsingStandardInterfaceTask( void *pvParameters )
+{
+	  Socket_t xSocket;
+	  struct freertos_sockaddr xDestinationAddress;
+	  uint8_t cString[ 50 ];
+	  uint32_t ulCount = 0UL;
+	  const TickType_t x1000ms = 5000UL / portTICK_PERIOD_MS;
+
+	     /* Send strings to port 10000 on IP address 192.168.0.50. */
+	  xDestinationAddress.sin_addr = FreeRTOS_inet_addr( "192.168.1.116" );
+	  xDestinationAddress.sin_port = FreeRTOS_htons( 9876 );
+
+	  long int pxMACAddress = FreeRTOS_htons(0xd8cb8a7e073d);
+	  uint32_t ulIPAddress = FreeRTOS_inet_addr( "192.168.1.116" );
+
+	  vARPRefreshCacheEntry(&pxMACAddress, ulIPAddress); // ipaddress.addr);
+
+
+
+	  /* Create the socket. */
+	  xSocket = FreeRTOS_socket( FREERTOS_AF_INET, FREERTOS_SOCK_DGRAM, FREERTOS_IPPROTO_UDP );
+
+	  /* Check the socket was created. */
+	  configASSERT( xSocket != FREERTOS_INVALID_SOCKET );
+	  /* NOTE: FreeRTOS_bind() is not called.  This will only work if
+	 	 ipconfigALLOW_SOCKET_SEND_WITHOUT_BIND is set to 1 in FreeRTOSIPConfig.h. */
+
+	  for( ;; )
+	  {
+		  /* Create the string that is sent. */
+		  sprintf( cString, "Standard send message number %lu\r\n", ulCount );
+
+		  /* Send the string to the UDP socket.  ulFlags is set to 0, so the standard
+	    	semantics are used.  That means the data from cString[] is copied
+	    	into a network buffer inside FreeRTOS_sendto(), and cString[] can be
+	   	   reused as soon as FreeRTOS_sendto() has returned. */
+		  FreeRTOS_sendto(xSocket,cString,strlen( cString ), 0, &xDestinationAddress, sizeof( xDestinationAddress ) );
+
+		  ulCount++;
+
+		  /* Wait until it is time to send again. */
+		  vTaskDelay( x1000ms );
+	  }
+}
+
+
+
+/*lint -save  -e970 Disable MISRA rule (6.3) checking. */
+int main(void)
+/*lint -restore Enable MISRA rule (6.3) checking. */
+{
+  /* Write your local variable definition here */
+  /*** Processor Expert internal initialization. DON'T REMOVE THIS CODE!!! ***/
+  PE_low_level_init();
+  /*** End of Processor Expert internal initialization.                    ***/
+//  prvSetupSoftwareInterrupt();
+//  NVIC_SetPendingIRQ( SWI_IRQn );
+
+  MPU_BWR_CESR_VLD(MPU, 0);
+//	 LwipInitSendUDP();
+//  LwipInitAskDHCPForIP();
+
+ // ip_addr_t ipaddress;
+ // IP4_ADDR(&ipaddress, 	192,168,1,116);
+  //
+
+  long int pxMACAddress = FreeRTOS_htons(0xd8cb8a7e073d);
+  uint32_t ulIPAddress = FreeRTOS_inet_addr( "192.168.1.116" ); // 3232235892; // 3232235998; // 116 192.168.1.222
+
+  vARPRefreshCacheEntry(&pxMACAddress, ulIPAddress); // ipaddress.addr);
+
+  FreeRTOS_IPInit( ucIPAddress,
+                   ucNetMask,
+                   ucGatewayAddress,
+                   ucDNSServerAddress,
+                   ucMACAddress );
+
+  TaskHandle_t xHandle = NULL;
+  //TaskHandle_t xDiscoverHandle = null;
+
+  xTaskCreate( vUDPSendUsingStandardInterfaceTask, "NAME",  200 , NULL, 3, &xHandle );
+ //  xTaskCreate( vSendDHCPDiscoverTask, "NAME",  200 , NULL, 3, &xDiscoverHandle );
+  vTaskStartScheduler();
+
+  printf("output");
+
+  /*
+#if configUSE_TRACE_HOOKS
+  RTOSTRC1_vTraceInitTraceData();// initialize trace first, as needed by RTOS functions
+#endif
+*/
+
+
+  /*** Don't write any code pass this line, or it will be deleted during code generation. ***/
+  /*** RTOS startup code. Macro PEX_RTOS_START is defined by the RTOS component. DON'T MODIFY THIS CODE!!! ***/
+  #ifdef PEX_RTOS_START
+    PEX_RTOS_START();                  /* Startup of the selected RTOS. Macro is defined by the RTOS component. */
+  #endif
+  /*** End of RTOS startup code.  ***/
+  /*** Processor Expert end of main routine. DON'T MODIFY THIS CODE!!! ***/
+  for(;;){}
+  /*** Processor Expert end of main routine. DON'T WRITE CODE BELOW!!! ***/
+} /*** End of main routine. DO NOT MODIFY THIS TEXT!!! ***/
+
+// /etc/init.d/networking restart
+// eth0 d8:cb:8a:7e:07:3d
+// wlan0  34:e6:ad:50:7a:9e
+
+
+
+/*
+  xTaskCreate(LwipInitTask,
+      "LwipInitTask",
+      configMINIMAL_STACK_SIZE * 4,
+      (void*)NULL,
+      tskIDLE_PRIORITY,
+      (xTaskHandle*)NULL);
+
+  vTaskStartScheduler();
+
+*/
+/*
+def_irq_handler    ENET_1588_Timer_IRQHandler
+def_irq_handler    ENET_Transmit_IRQHandler
+def_irq_handler    ENET_Receive_IRQHandler
+def_irq_handler    ENET_Error_IRQHandler
+
+NVIC_SetPriority( GMAC_IRQn, configMAC_INTERRUPT_PRIORITY );
+NVIC_EnableIRQ( GMAC_IRQn );
+	*/
+
+
+
+/*
+static const uint8_t ucIPAddress[ 4 ] = { 192, 168, 1, 200 };
+static const uint8_t ucNetMask[ 4 ] = { 255, 255, 255, 255 };
+static const uint8_t ucGatewayAddress[ 4 ] = { 192, 168, 1, 1 };
+// * The following is the address of an OpenDNS server.
+static const uint8_t ucDNSServerAddress[ 4 ] = { 208, 67, 222, 222 };
+// * The MAC address array is not declared const as the MAC address will normally be read from an EEPROM and not hard coded (in real deployed applications).
+static uint8_t ucMACAddress[ 6 ] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+
+SWI_IRQHandler
+
+ENET_1588_Timer_IRQHandler
+ENET_Transmit_IRQHandler
+ENET_Receive_IRQHandler
+ENET_Error_IRQHandler
+
+*/
+
+//
+//static void prvSendDHCPDiscoverTask( void *pvParameters )
+//{
+//	  Socket_t xSocket;
+//	  struct freertos_sockaddr xDestinationAddress;
+//	  uint8_t cString[ 50 ];
+//	  uint32_t ulCount = 0UL;
+//	  const TickType_t x1000ms = 5000UL / portTICK_PERIOD_MS;
+//
+//	     /* Send strings to port 10000 on IP address 192.168.0.50. */
+//	  xDestinationAddress.sin_addr = FreeRTOS_inet_addr( "192.168.1.116" );
+//	  xDestinationAddress.sin_port = FreeRTOS_htons( 9876 );
+//
+//	  /* Create the socket. */
+//	  xSocket = FreeRTOS_socket( FREERTOS_AF_INET, FREERTOS_SOCK_DGRAM, FREERTOS_IPPROTO_UDP );
+//
+//	  /* Check the socket was created. */
+//	  configASSERT( xSocket != FREERTOS_INVALID_SOCKET );
+//	  /* NOTE: FreeRTOS_bind() is not called.  This will only work if
+//	 	 ipconfigALLOW_SOCKET_SEND_WITHOUT_BIND is set to 1 in FreeRTOSIPConfig.h. */
+//
+//	  for( ;; )
+//	  {
+//		  prvSendDHCPDiscover();
+//
+//		  vTaskDelay( x1000ms );
+//	  }
+//}
+
+
+/* END main */
+/*!
+** @}
+*/
+/*
+** ###################################################################
+**
+**     This file was created by Processor Expert 10.5 [05.21]
+**     for the Freescale Kinetis series of microcontrollers.
+**
+** ###################################################################
+*/
+
+
+
+/*
+sudo ifconfig eth0 192.168.1.222 netmask 255.255.255.0
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -A FORWARD --in-interface eth0 -j ACCEPT
+sudo iptables --table nat -A POSTROUTING --out-interface wlan0 -j MASQUERADE
+ */
+
+
+/*
+void sendBroadcast() {
+	//broadcast something
+	struct pbuf *p;
+	char msg[] = "This is a test message";
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(msg), PBUF_RAM);
+	memcpy(p->payload, msg, sizeof(msg));
+	err_t res = udp_sendto(pcb, p, IP_ADDR_BROADCAST, 5555); //broadcast test msg
+	pbuf_free(p); //De-allocate packet buffer
+	printf("Sent test message to port 1234, result is %d Waiting...\r\n", res);
+}
+*/
+
+/*
+inet addr:10.20.9.65  Bcast:10.20.15.255  Mask:255.255.248.0
+ */
